@@ -10,11 +10,11 @@ struct TrimmerApp: App {
             ContentView(model: model, dependencies: model.dependencies)
                 .onAppear {
                     delegate.model = model
+                    delegate.fileOpenHandler = { [weak model] url in model?.open(url) }
                     #if DEBUG
                     delegate.runPreviewIfRequested()
                     #endif
                 }
-                .onOpenURL { model.open($0) }
         }
         .defaultSize(width: 900, height: 200)
         .windowResizability(.contentSize)
@@ -43,6 +43,24 @@ struct TrimmerApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var model: EditorModel?
+    var fileOpenHandler: ((URL) -> Void)? {
+        didSet {
+            guard let fileOpenHandler, let pendingOpenURL else { return }
+            self.pendingOpenURL = nil
+            fileOpenHandler(pendingOpenURL)
+        }
+    }
+    private var pendingOpenURL: URL?
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard let url = urls.first else { return }
+        if let fileOpenHandler {
+            fileOpenHandler(url)
+        } else {
+            pendingOpenURL = url
+        }
+    }
+
     #if DEBUG
     private var previewStarted = false
     /// Deterministic rendering of the actual native window for local visual verification.
