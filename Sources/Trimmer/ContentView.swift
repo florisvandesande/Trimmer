@@ -65,10 +65,7 @@ struct ContentView: View {
         HStack(alignment: .center) {
             timeBlock("BEGIN", value: model.start, action: { model.pause(); model.seek(model.start) })
             Spacer(minLength: 12)
-            HStack(spacing: 14) {
-                Button { model.pause(); model.seek(model.start) } label: {
-                    Image(systemName: "backward.end.fill").font(.system(size: 12))
-                }.help("Naar het begin van de selectie")
+            HStack(spacing: 10) {
                 Button { model.togglePlayback() } label: {
                     Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
                         .font(.system(size: 14, weight: .semibold))
@@ -80,9 +77,11 @@ struct ContentView: View {
                 .keyboardShortcut(.space, modifiers: [])
                 .help("Afspelen of pauzeren (spatiebalk)")
                 .accessibilityLabel(model.isPlaying ? "Pauzeren" : "Afspelen")
-                Button { model.previewEnd() } label: {
-                    Image(systemName: "forward.end.fill").font(.system(size: 12))
-                }.help("Laatste drie seconden beluisteren")
+                Text(timeLabel(model.position, precise: false))
+                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+                    .accessibilityLabel("Huidige tijd: " + timeLabel(model.position, precise: false))
             }
             .buttonStyle(.plain).disabled(!model.canPlay)
             Spacer(minLength: 12)

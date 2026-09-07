@@ -178,8 +178,6 @@ final class EditorModel: ObservableObject {
         hasPositionedPlayhead = false; isTrimming = false
     }
 
-    func previewEnd() { pause(); seek(max(start, end - 3)); togglePlayback() }
-
     private func tick() {
         guard isPlaying, let player else { return }
         position = player.currentTime
