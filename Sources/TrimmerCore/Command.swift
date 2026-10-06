@@ -12,14 +12,15 @@ public enum Command {
     public static func run(_ executable: URL, _ arguments: [String],
                            environment: [String: String] = [:],
                            outputFile: URL? = nil,
-                           onProgress: (@Sendable (String) -> Void)? = nil) async throws -> Data {
+                           onProgress: (@Sendable (String) -> Void)? = nil,
+                           onOutput: (@Sendable (Data) -> Void)? = nil) async throws -> Data {
         let job = RunningCommand()
         return try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation { continuation in
                 DispatchQueue.global(qos: .userInitiated).async {
                     do {
                         continuation.resume(returning: try job.run(executable, arguments, environment,
-                                                                   outputFile, onProgress))
+                                                                   outputFile, onProgress, onOutput))
                     } catch { continuation.resume(throwing: error) }
                 }
             }
@@ -39,7 +40,8 @@ private final class RunningCommand: @unchecked Sendable {
     }
 
     func run(_ executable: URL, _ arguments: [String], _ environment: [String: String],
-             _ outputFile: URL?, _ progress: (@Sendable (String) -> Void)?) throws -> Data {
+             _ outputFile: URL?, _ progress: (@Sendable (String) -> Void)?,
+             _ output: (@Sendable (Data) -> Void)?) throws -> Data {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -65,14 +67,18 @@ private final class RunningCommand: @unchecked Sendable {
         let reader = try FileHandle(forReadingFrom: stdout)
         defer { try? reader.close() }
         while child.isRunning {
-            if let progress, let data = try reader.readToEnd(), !data.isEmpty {
-                progress(String(decoding: data, as: UTF8.self))
+            if progress != nil || output != nil {
+                while let data = try reader.read(upToCount: 256 * 1024), !data.isEmpty {
+                    progress?(String(decoding: data, as: UTF8.self)); output?(data)
+                }
             }
             Thread.sleep(forTimeInterval: 0.1)
         }
         child.waitUntilExit()
-        if let progress, let data = try reader.readToEnd(), !data.isEmpty {
-            progress(String(decoding: data, as: UTF8.self))
+        if progress != nil || output != nil {
+            while let data = try reader.read(upToCount: 256 * 1024), !data.isEmpty {
+                progress?(String(decoding: data, as: UTF8.self)); output?(data)
+            }
         }
         lock.lock(); let wasCancelled = cancelled; process = nil; lock.unlock()
         if wasCancelled { throw CancellationError() }
@@ -80,6 +86,6 @@ private final class RunningCommand: @unchecked Sendable {
             let details = (try? String(contentsOf: stderr, encoding: .utf8)) ?? ""
             throw CommandFailure(details.isEmpty ? "De opdracht is mislukt (\(child.terminationStatus))." : String(details.suffix(6000)))
         }
-        return outputFile == nil ? try Data(contentsOf: stdout) : Data()
+        return outputFile == nil && output == nil ? try Data(contentsOf: stdout) : Data()
     }
 }

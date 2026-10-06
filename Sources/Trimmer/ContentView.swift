@@ -29,7 +29,7 @@ struct ContentView: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 10)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .disabled(model.exporting)
+                    .disabled(model.exporting || model.closeLocked)
 
                     Rectangle().fill(.white.opacity(0.06)).frame(width: 1)
                     sidebar(for: audio)
@@ -43,10 +43,11 @@ struct ContentView: View {
         .background(Color(red: 0.085, green: 0.088, blue: 0.092))
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(dragTarget ? trimYellow : .clear, lineWidth: 2))
         .preferredColorScheme(.dark)
+        .disabled(model.closeLocked)
         .onDrop(of: [.fileURL], isTargeted: $dragTarget) { providers in
-            guard !model.exporting, let provider = providers.first else { return false }
+            guard !model.exporting, !model.closeLocked, let provider = providers.first else { return false }
             _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                if let url { Task { @MainActor in model.open(url) } }
+                if let url { Task { @MainActor in model.openRequested(url) } }
             }
             return true
         }
@@ -159,14 +160,14 @@ struct ContentView: View {
                     Button { model.save() } label: {
                         Text("Kort in en bewaar…").frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(YellowButtonStyle()).disabled(!model.hasTrim)
+                    .buttonStyle(YellowButtonStyle()).disabled(!model.hasTrim || !model.canTrim)
                     .keyboardShortcut("s")
                     Button { model.reset() } label: {
                         Text("Herstel").font(.system(size: 11))
                             .frame(maxWidth: .infinity).padding(.vertical, 5)
                             .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 7))
                     }
-                    .buttonStyle(.plain).foregroundStyle(.secondary).disabled(!model.hasTrim)
+                    .buttonStyle(.plain).foregroundStyle(.secondary).disabled(!model.hasTrim || !model.canTrim)
                 }
             }
         }

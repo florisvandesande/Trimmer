@@ -1,64 +1,77 @@
+import AppKit
 import SwiftUI
 
 @main
 struct TrimmerApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
-    @StateObject private var model = EditorModel()
+    @ObservedObject private var windows = EditorWindows.shared
 
     var body: some Scene {
-        Window("Trimmer", id: "main") {
-            ContentView(model: model, dependencies: model.dependencies)
-                .onAppear {
-                    delegate.model = model
-                    delegate.fileOpenHandler = { [weak model] url in model?.open(url) }
-                    #if DEBUG
-                    delegate.runPreviewIfRequested()
-                    #endif
-                }
+        WindowGroup("Trimmer", id: "bootstrap") {
+            BootstrapWindowView()
         }
-        .defaultSize(width: 900, height: 200)
-        .windowResizability(.contentSize)
-        .windowStyle(.hiddenTitleBar)
+        Settings { AnalysisSettingsView() }
         .commands {
+            CommandGroup(replacing: .appInfo) {
+                Button("Over Trimmer") { showAboutPanel() }
+            }
             CommandGroup(replacing: .newItem) {
-                Button("Open audio…") { model.chooseFile() }.keyboardShortcut("o")
-                    .disabled(model.exporting)
+                Button("Open audio…") {
+                    if let model = windows.activeModel { model.chooseFile() }
+                    else { windows.open(); windows.activeModel?.chooseFile() }
+                }.keyboardShortcut("o")
+                Button("Sluit venster") { NSApp.keyWindow?.performClose(nil) }.keyboardShortcut("w")
             }
-            CommandGroup(replacing: .saveItem) {
-                Button("Kort in en bewaar…") { model.save() }.keyboardShortcut("s")
-                    .disabled(!model.hasTrim || model.exporting)
-            }
-            CommandMenu("Afspelen") {
-                Button(model.isPlaying ? "Pauzeer" : "Speel af") { model.togglePlayback() }
-                    .keyboardShortcut(.space, modifiers: []).disabled(!model.canPlay || model.exporting)
-                Button("Eén seconde terug") { model.seek(model.position - 1) }.keyboardShortcut(.leftArrow, modifiers: [])
-                Button("Eén seconde vooruit") { model.seek(model.position + 1) }.keyboardShortcut(.rightArrow, modifiers: [])
-                Divider()
-                Button("Herstel selectie") { model.reset() }.keyboardShortcut("0").disabled(model.exporting)
-            }
+            EditorCommands(model: windows.activeModel)
+        }
+    }
+
+    private func showAboutPanel() {
+        let credits = NSMutableAttributedString(string: "Gebouwd door ruimtegever.\n\n")
+        let starText = NSAttributedString(
+            string: "Bevalt Trimmer? Geef het project een ster op GitHub.",
+            attributes: [
+                .link: URL(string: "https://github.com/florisvandesande/Trimmer")!,
+                .foregroundColor: NSColor.linkColor
+            ]
+        )
+        credits.append(starText)
+        NSApp.orderFrontStandardAboutPanel(options: [.credits: credits])
+    }
+}
+
+private struct BootstrapWindowView: NSViewRepresentable {
+    func makeNSView(context: Context) -> BootstrapWindowHost {
+        BootstrapWindowHost()
+    }
+
+    func updateNSView(_ nsView: BootstrapWindowHost, context: Context) {}
+}
+
+private final class BootstrapWindowHost: NSView {
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window != nil else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.window?.close()
         }
     }
 }
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    weak var model: EditorModel?
+    var model: EditorModel? { EditorWindows.shared.activeModel }
     var fileOpenHandler: ((URL) -> Void)? {
         didSet {
-            guard let fileOpenHandler, let pendingOpenURL else { return }
-            self.pendingOpenURL = nil
-            fileOpenHandler(pendingOpenURL)
+            guard let fileOpenHandler else { return }
+            let pending = pendingOpenURLs; pendingOpenURLs = []
+            pending.forEach(fileOpenHandler)
         }
     }
-    private var pendingOpenURL: URL?
-
+    private var pendingOpenURLs: [URL] = []
     func application(_ application: NSApplication, open urls: [URL]) {
-        guard let url = urls.first else { return }
-        if let fileOpenHandler {
-            fileOpenHandler(url)
-        } else {
-            pendingOpenURL = url
-        }
+        if let fileOpenHandler { urls.forEach(fileOpenHandler) }
+        else { pendingOpenURLs.append(contentsOf: urls) }
     }
 
     #if DEBUG
@@ -97,19 +110,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     #endif
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+        fileOpenHandler = { EditorWindows.shared.open($0) }
+        if EditorWindows.shared.editors.isEmpty { EditorWindows.shared.open() }
         NSApp.activate(ignoringOtherApps: true)
+        #if DEBUG
+        runPreviewIfRequested()
+        #endif
     }
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { EditorWindows.shared.open() }
+        return false
+    }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        if model?.exporting == true || model?.dependencies.installing == true {
-            let alert = NSAlert()
-            alert.messageText = "Er is nog een bewerking bezig"
-            alert.informativeText = "Wacht tot de bewerking is afgerond voordat u Trimmer sluit."
-            alert.addButton(withTitle: "Terug naar Trimmer")
-            alert.runModal()
-            return .terminateCancel
-        }
-        return .terminateNow
+        guard !EditorWindows.shared.terminating else { return .terminateCancel }
+        Task { sender.reply(toApplicationShouldTerminate: await EditorWindows.shared.confirmTermination()) }
+        return .terminateLater
     }
-    func applicationWillTerminate(_ notification: Notification) { model?.shutdown() }
+    func applicationWillTerminate(_ notification: Notification) {
+        for editor in EditorWindows.shared.editors { editor.model.shutdown() }
+    }
+}
+
+struct EditorCommands: Commands {
+    let model: EditorModel?
+    var body: some Commands {
+        CommandGroup(replacing: .saveItem) {
+            if let model { SaveCommand(model: model) }
+        }
+        CommandMenu("Afspelen") {
+            if let model { PlaybackCommands(model: model) }
+        }
+        CommandMenu("Golfvorm") {
+            if let model { ZoomCommands(model: model) }
+        }
+    }
+}
+
+private struct SaveCommand: View {
+    @ObservedObject var model: EditorModel
+    var body: some View {
+        Button("Kort in en bewaar…") { model.save() }.keyboardShortcut("s")
+            .disabled(!model.hasTrim || !model.canTrim || model.exporting || model.closeLocked)
+    }
+}
+
+private struct PlaybackCommands: View {
+    @ObservedObject var model: EditorModel
+    var body: some View {
+        Button(model.isPlaying ? "Pauzeer" : "Speel af") { model.togglePlayback() }
+            .keyboardShortcut(.space, modifiers: []).disabled(!model.canPlay || model.exporting || model.closeLocked)
+        Button("Eén seconde terug") { model.seek(model.position - 1) }.keyboardShortcut(.leftArrow, modifiers: [])
+        Button("Eén seconde vooruit") { model.seek(model.position + 1) }.keyboardShortcut(.rightArrow, modifiers: [])
+        Divider()
+        Button("Herstel selectie") { model.reset() }.keyboardShortcut("0").disabled(model.exporting || model.closeLocked)
+    }
+}
+
+private struct ZoomCommands: View {
+    @ObservedObject var model: EditorModel
+    var body: some View {
+            Button("Zoom in") { model.zoom(2) }.keyboardShortcut("+", modifiers: .command)
+                .disabled(model.audio == nil)
+            Button("Zoom uit") { model.zoom(0.5) }.keyboardShortcut("-", modifiers: .command)
+                .disabled(model.audio == nil)
+            Button("Toon volledige golfvorm") { model.showAll() }.keyboardShortcut("0", modifiers: [.command, .shift])
+                .disabled(model.audio == nil)
+    }
 }

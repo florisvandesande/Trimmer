@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import TrimmerCore
 
 let trimYellow = Color(red: 1, green: 0.79, blue: 0.16)
@@ -9,29 +10,38 @@ struct TimelineView: View {
     @State private var scrubbing = false
     @State private var resumeAfterScrub = false
     @State private var trimDragOrigin: Double?
+    @State private var dragViewportOrigin = 0.0
+    @State private var dragTranslation = 0.0
+    @State private var dragPointer = 0.0
+    @State private var draggingStart = true
+    private let autoScroll = Timer.publish(every: 1.0 / 30, on: .main, in: .common).autoconnect()
 
     var body: some View {
         GeometryReader { geometry in
             let width = max(1, geometry.size.width - 28)
-            let left = width * model.start / audio.duration
-            let right = width * model.end / audio.duration
-            let playhead = width * model.position / audio.duration
+            let timeline = TimelineGeometry(start: model.visibleStart, duration: model.viewDuration, width: width)
+            let left = timeline.x(for: model.start)
+            let right = timeline.x(for: model.end)
+            let playhead = timeline.x(for: model.position)
             ZStack(alignment: .topLeading) {
                 VStack(spacing: 8) {
                     waveform(width: width)
-                        .frame(height: 90)
+                        .frame(width: width, height: 90)
                         .contentShape(Rectangle())
                         .gesture(DragGesture(minimumDistance: 0).onChanged { value in
                             if !scrubbing {
                                 resumeAfterScrub = model.isPlaying; model.pause(); scrubbing = true
                             }
-                            model.seek(value.location.x / width * audio.duration)
+                            model.seek(model.visibleStart + value.location.x / width * model.viewDuration)
                         }.onEnded { _ in
                             scrubbing = false
                             if resumeAfterScrub { model.togglePlayback() }
                         })
                         .accessibilityLabel("Golfvorm en afspeelpositie")
-                        .accessibilityValue(timeLabel(model.position))
+                        .accessibilityValue(timeLabel(model.position) + ", zichtbaar " + timeLabel(model.visibleStart) + " tot " + timeLabel(model.visibleStart + model.viewDuration))
+                        .accessibilityScrollAction { edge in
+                            model.scroll((edge == .leading || edge == .top ? 1 : -1) * model.viewDuration * 0.8)
+                        }
                         .accessibilityAdjustableAction { direction in
                             model.seek(model.position + (direction == .increment ? 1 : -1))
                         }
@@ -48,10 +58,11 @@ struct TimelineView: View {
                             .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(trimYellow, lineWidth: 2))
                             .frame(width: max(2, right - left))
                             .offset(x: left)
-                        handle(isStart: true, width: width).offset(x: left - 10)
-                        handle(isStart: false, width: width).offset(x: right - 10)
+                        if timeline.contains(left) || (trimDragOrigin != nil && draggingStart) { handle(isStart: true, width: width).offset(x: left - 10) }
+                        if timeline.contains(right) || (trimDragOrigin != nil && !draggingStart) { handle(isStart: false, width: width).offset(x: right - 10) }
                     }
-                    .frame(height: 30)
+                    .frame(width: width, height: 30, alignment: .leading)
+                    .disabled(!model.canTrim)
                     .accessibilityElement(children: .contain)
                 }
                 Rectangle().fill(Color.white.opacity(0.88))
@@ -60,7 +71,7 @@ struct TimelineView: View {
                     .allowsHitTesting(false)
                 Circle().fill(Color.white).frame(width: 5, height: 5)
                     .offset(x: playhead - 2, y: 1).allowsHitTesting(false)
-                if model.waveformLoading {
+                if model.waveformLoading && model.waveform.levels.first?.isEmpty != false {
                     HStack(spacing: 9) {
                         ProgressView().controlSize(.small)
                         Text(model.canPlay ? "Golfvorm berekenen…" : model.loadingMessage)
@@ -70,7 +81,21 @@ struct TimelineView: View {
                     .position(x: width / 2, y: 45)
                 }
             }
+            .frame(width: width, height: 128, alignment: .topLeading)
+            .background(TimelineGestures(zoom: { factor, anchor in model.zoom(factor, anchor: anchor) },
+                                         scroll: { pixels in model.scroll(pixels / width * model.viewDuration) })
+                .frame(width: width, height: 128))
+            .onReceive(autoScroll) { _ in
+                guard trimDragOrigin != nil else { return }
+                let direction = dragPointer < 24 ? -1.0 : dragPointer > width - 24 ? 1.0 : 0
+                if direction != 0 {
+                    model.scroll(direction * model.viewDuration / 90)
+                    updateDrag(width: width)
+                }
+            }
             .padding(.horizontal, 14)
+            .contentShape(Rectangle())
+            .clipped()
         }
         .frame(height: 128)
     }
@@ -85,15 +110,28 @@ struct TimelineView: View {
                 context.stroke(Path { p in p.move(to: CGPoint(x: x, y: 0)); p.addLine(to: CGPoint(x: x, y: size.height)) },
                                with: .color(.white.opacity(0.035)), lineWidth: 1)
             }
-            guard !model.peaks.isEmpty else { return }
+            let edges = Array(Set(model.repeats.flatMap(\.edges))).sorted()
+            for (from, to) in zip(edges, edges.dropFirst()) {
+                let midpoint = (from + to) / 2
+                let repeated = model.repeats.contains { midpoint >= $0.repeatedStart && midpoint < $0.repeatedStart + $0.duration }
+                let original = model.repeats.contains { midpoint >= $0.originalStart && midpoint < $0.originalStart + $0.duration }
+                guard repeated || original else { continue }
+                let left = max(0, (from - model.visibleStart) / model.viewDuration * size.width)
+                let right = min(size.width, (to - model.visibleStart) / model.viewDuration * size.width)
+                if right > left {
+                    context.fill(Path(CGRect(x: left, y: 0, width: right - left, height: size.height)),
+                                 with: .color(trimYellow.opacity(repeated ? 0.30 : 0.15)))
+                }
+            }
+            guard model.waveform.levels.first?.isEmpty == false else { return }
             let columns = max(1, Int(size.width / 3))
-            let maxPeak = max(0.001, model.peaks.max() ?? 1)
+            let maxPeak = model.waveform.maximum
             for column in 0..<columns {
-                let first = column * model.peaks.count / columns
-                let last = min(model.peaks.count, max(first + 1, (column + 1) * model.peaks.count / columns))
-                let peak = model.peaks[first..<last].max() ?? 0
+                let from = model.visibleStart + Double(column) / Double(columns) * model.viewDuration
+                let to = model.visibleStart + Double(column + 1) / Double(columns) * model.viewDuration
+                let peak = model.waveform.peak(from: from, to: to)
                 let height = max(2, Double(peak / maxPeak) * (size.height - 20))
-                let time = (Double(column) + 0.5) / Double(columns) * audio.duration
+                let time = (from + to) / 2
                 let selected = time >= model.start && time <= model.end
                 let rect = CGRect(x: Double(column) * size.width / Double(columns), y: midpoint - height / 2, width: 2, height: height)
                 context.fill(Path(roundedRect: rect, cornerRadius: 1),
@@ -116,14 +154,14 @@ struct TimelineView: View {
                 .onChanged { value in
                     if trimDragOrigin == nil {
                         trimDragOrigin = isStart ? model.start : model.end
+                        dragViewportOrigin = model.visibleStart
+                        draggingStart = isStart
                         model.beginTrimming()
                         if value.translation.width == 0 { return }
                     }
-                    guard let origin = trimDragOrigin else { return }
-                    // Preserve the grab offset: clicking either side of a handle must not jump it.
-                    let time = origin + value.translation.width / width * audio.duration
-                    if isStart { model.setStart(time, timelineWidth: width) }
-                    else { model.setEnd(time, timelineWidth: width) }
+                    dragTranslation = value.translation.width
+                    dragPointer = value.location.x - 14
+                    updateDrag(width: width)
                 }
                 .onEnded { _ in
                     trimDragOrigin = nil
@@ -137,4 +175,11 @@ struct TimelineView: View {
                 if isStart { model.setStart(model.start + delta) } else { model.setEnd(model.end + delta) }
             }
     }
+    private func updateDrag(width: Double) {
+        guard let origin = trimDragOrigin else { return }
+        let time = origin + dragTranslation / width * model.viewDuration + model.visibleStart - dragViewportOrigin
+        if draggingStart { model.setStart(time, timelineWidth: width) }
+        else { model.setEnd(time, timelineWidth: width) }
+    }
+
 }

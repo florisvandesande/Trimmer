@@ -4,31 +4,7 @@ import Darwin
 extension FFmpegTools {
     /// Decoding is for display only. Export never uses these samples.
     public func waveform(for audio: AudioFile, in workspace: URL) async throws -> [Float] {
-        let raw = workspace.appendingPathComponent("waveform.f32")
-        defer { try? FileManager.default.removeItem(at: raw) }
-        try await Command.run(ffmpeg, ["-v", "error", "-nostdin", "-i", audio.url.path,
-            "-map", "0:a:0", "-vn", "-ar", "8000", "-c:a", "pcm_f32le", "-f", "f32le", "-"], outputFile: raw)
-        return try await Task.detached(priority: .userInitiated) {
-            let handle = try FileHandle(forReadingFrom: raw)
-            defer { try? handle.close() }
-            let bins = min(24_000, max(600, Int(audio.duration * 100)))
-            let attributes = try FileManager.default.attributesOfItem(atPath: raw.path)
-            let sampleCount = max(1, (attributes[.size] as? NSNumber)?.intValue ?? 0) / 4
-            var peaks = [Float](repeating: 0, count: bins)
-            var offset = 0
-            while let chunk = try handle.read(upToCount: 64 * 1024), !chunk.isEmpty {
-                try Task.checkCancellation()
-                chunk.withUnsafeBytes { bytes in
-                    for index in stride(from: 0, to: bytes.count - 3, by: 4) {
-                        let value = Float(bitPattern: UInt32(littleEndian: bytes.loadUnaligned(fromByteOffset: index, as: UInt32.self)))
-                        let bin = min(bins - 1, offset * bins / max(1, sampleCount))
-                        if value.isFinite { peaks[bin] = max(peaks[bin], abs(value)) }
-                        offset += 1
-                    }
-                }
-            }
-            return peaks
-        }.value
+        try await analyze(audio).waveform.levels.first ?? []
     }
 
     public func playbackCopy(for audio: AudioFile, in workspace: URL) async throws -> URL {
