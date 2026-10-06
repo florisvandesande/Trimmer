@@ -53,7 +53,7 @@ public struct FFmpegTools: Sendable {
         return nil
     }
 
-    public func inspect(_ url: URL) async throws -> AudioFile {
+    public func metadata(_ url: URL) async throws -> AudioFile {
         let data = try await Command.run(ffprobe, ["-v", "error", "-show_streams", "-show_format", "-of", "json", url.path])
         let result = try JSONDecoder().decode(Probe.self, from: data)
         let audioStreams = result.streams.filter { $0.codec_type == "audio" }
@@ -66,19 +66,38 @@ public struct FFmpegTools: Sendable {
         guard let duration = Double(stream.duration ?? result.format.duration ?? ""), duration.isFinite, duration > 0 else {
             throw CommandFailure("De lengte van dit audiobestand kon niet worden gelezen.")
         }
-        let origin = Double(result.format.start_time ?? "0") ?? 0
-        let packets = try await Command.run(ffprobe, ["-v", "error", "-select_streams", "a:0", "-show_packets",
-            "-show_entries", "packet=pts_time", "-of", "csv=p=0", url.path])
-        let boundaries = String(decoding: packets, as: UTF8.self).split(separator: "\n").compactMap { line -> Double? in
-            guard let first = line.split(separator: ",").first, let pts = Double(first) else { return nil }
-            let time = pts - origin
-            return time > 0 && time < duration && time.isFinite ? time : nil
-        }
-        guard !boundaries.isEmpty else { throw CommandFailure("Geen bruikbare knippunten gevonden in dit bestand.") }
         return AudioFile(url: url, duration: duration, codec: stream.codec_name ?? "audio",
                          sampleRate: Int(stream.sample_rate ?? "0") ?? 0, channels: stream.channels ?? 1,
-                         boundaries: [0] + Array(Set(boundaries)).sorted() + [duration],
+                         boundaries: [],
                          hasArtwork: result.streams.contains { $0.codec_type == "video" && $0.disposition?["attached_pic"] == 1 })
+    }
+
+    public func inspect(_ url: URL) async throws -> AudioFile {
+        let file = try await metadata(url)
+        return try await indexed(file)
+    }
+
+    public func indexed(_ file: AudioFile) async throws -> AudioFile {
+        let packets = try await Command.run(ffprobe, ["-v", "error", "-select_streams", "a:0", "-show_packets",
+            "-show_entries", "packet=pts_time:format=start_time", "-of", "json", file.url.path])
+        struct PacketProbe: Decodable {
+            struct Packet: Decodable { let pts_time: String? }
+            struct Format: Decodable { let start_time: String? }
+            let packets: [Packet]
+            let format: Format?
+        }
+        let probe = try JSONDecoder().decode(PacketProbe.self, from: packets)
+        let origin = Double(probe.format?.start_time ?? "0") ?? 0
+        let boundaries = probe.packets.compactMap { packet -> Double? in
+            guard let text = packet.pts_time, let pts = Double(text) else { return nil }
+            let time = pts - origin
+            return time > 0 && time < file.duration && time.isFinite ? time : nil
+        }
+        guard !boundaries.isEmpty else { throw CommandFailure("Geen bruikbare knippunten gevonden in dit bestand.") }
+        return AudioFile(url: file.url, duration: file.duration, codec: file.codec,
+                         sampleRate: file.sampleRate, channels: file.channels,
+                         boundaries: [0] + Array(Set(boundaries)).sorted() + [file.duration],
+                         hasArtwork: file.hasArtwork)
     }
 }
 

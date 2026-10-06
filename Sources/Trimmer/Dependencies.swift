@@ -17,7 +17,12 @@ final class Dependencies: ObservableObject {
             .first(where: { FileManager.default.isExecutableFile(atPath: $0) }).map { URL(fileURLWithPath: $0) }
     }
 
+    private var checkInProgress = false
+
     func check() async {
+        guard tools == nil, !checkInProgress else { return }
+        checkInProgress = true
+        defer { checkInProgress = false }
         checking = true
         defer { checking = false }
         if let found = FFmpegTools.locate() {
